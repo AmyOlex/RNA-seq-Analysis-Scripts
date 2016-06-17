@@ -1,0 +1,163 @@
+#!/bin/bash
+
+# Argument = -f inputFile -a annotationFile -i indexLocation -o outputDirectory -h help
+
+usage()
+{
+cat << EOF
+usage: $0 options
+
+This script runs Amy's RNASeq pipeline that includes:
+1) Tophat2 Alignment of reads
+2) SamTools BAM file sorting and post-processing
+3) HTSeq counts of read hits per annotation feature
+
+INPUT: The input file for the -f parameter must contain the file names of the fastq files to be 
+aligned by TopHat2. One line per sample.  If using paired-end reads, list both files on the same
+line seperated by a space.  If using single reads, then only one file name per line. To create 
+this file you can put all fastq file in one folder and run:
+
+>> ls > myFiles.txt
+
+Then open the file for editing and arrange so that paired-end files are on the same line.  However,
+it may be a good idea to include the full path to the files if you plan on executing this script from
+a different directory than the one that contains the fastq file.
+
+Example for paired-end reads:
+seq1-1.fq seq1-2.fq
+seq2-1.fq seq2-2.fq
+seq3-1.fq seq3-2.fq
+
+OUTPUT: A folder containing read count files from HTSeq will be produced as the end result of 
+this script.  This folder can then be processed for differential expression.  The DESeq package
+in R can import these files directly into a count table with no further manipulation. Refer to
+the R DESeq manual for more information.
+
+OPTIONS:
+   -h      Show this message
+   -f      Input text file that contains 1 fastq file name per line. Paired read files must be 
+           listed next to each other.
+   -a      The GTF or GFF formatted annotation file for the features being analyzed.
+   -i      The location of the reference genome Bowtie2 index files.
+   -o      Optional.  The directory all files and folders created by this script should be saved in. 
+           Default is the current working directory.
+
+DEPENDENCIES: This script uses TopHat2, Bowtie2, SamTools and HTSeq.  These tools must be installed
+and working to run this pipeline.  
+
+EXAMPLE USAGE: 
+>> nohup rnaseq-pipeline -f files_to_align.txt -a /data/iGenomes/Arabidopsis_thaliana/NCBI/TAIR10/Annotation/Genes/genes.gtf -i /data/iGenomes/Arabidopsis_thaliana/NCBI/TAIR10/Sequence/Bowtie2Index/genome -o 092614_BT2_alignment &
+
+EOF
+}
+
+INFILE=
+ANFILE=
+INDEX=
+OUTDIR="."
+while getopts “hf:a:i:o:” OPTION
+do
+     case $OPTION in
+         h)
+             usage
+             exit 1
+             ;;
+         f)
+             INFILE=$OPTARG
+             ;;
+         a)
+             ANFILE=$OPTARG
+             ;;
+         i)
+             INDEX=$OPTARG
+             ;;
+         o)
+             OUTDIR=$OPTARG
+             ;;
+         ?)
+             usage
+             exit
+             ;;
+     esac
+done
+
+if [[ -z $INFILE ]] || [[ -z $ANFILE ]] || [[ -z $INDEX ]]
+then
+     usage
+     exit 1
+fi
+
+saveIFS=$IFS
+
+# Get the current directory, which is supposed to contain the fq files.
+CURRENTDIR=`pwd`
+
+
+# Make the OUTDIR and the HTSeqCounts directory
+mkdir $OUTDIR 
+cd $OUTDIR
+mkdir HTSeqCounts
+cd $CURRENTDIR
+
+
+
+# sets the delimiter for the for loop to the new line char for lists.
+IFS=$'\n' read -d '' -r -a fileList < $INFILE
+#echo "${fileList[1]}"
+
+IFS=$'\n'
+
+# Loop through each line in the list of fastq files
+for file in ${fileList[@]}
+do
+   #echo $file
+   # reset the IFS, if it is not reset here, then the arguments that get passed to the files get truncated prematurly for some reason
+   IFS=$saveIFS
+
+   # Get a unique output folder name and concatenate with output directory from user
+   tmp="$( cut -d '.' -f 1 <<<"$file" )"
+   #echo "$tmp"
+   tmp2="$( basename $tmp )"
+   #echo "$tmp2"
+   regex="140821HiSeq_Run_(.*)_WAKE_.*(_L00.)_.*"
+   if [[ $tmp2 =~ $regex ]];then
+      runName=${BASH_REMATCH[1]}${BASH_REMATCH[2]}
+   else
+      runName=$tmp2
+   fi
+
+   echo "Run Name: $runName"
+   ext1="_TH2"
+   ext2="_sorted"
+   runDir=`echo "$OUTDIR/$runName$ext1"`
+   
+   # Run Tophat2
+   cmd=`echo "tophat2 -p 8 -G $ANFILE -o $runDir $INDEX $file"`
+   echo "Executing ... $cmd"
+   eval $cmd
+
+   # Change into the runDir directory
+   cd $runDir
+   
+   # Run SamTools to sort the bam file
+   cmd=`echo "samtools sort -n accepted_hits.bam $runName$ext2"`
+   echo "Executing ... $cmd"
+   eval $cmd
+
+   mybam=`ls *_sorted.bam`
+   mycounts=`echo $mybam.counts`
+
+   # Run HTSeq on sorted BAM to get count data
+   cmd=`echo "htseq-count -f bam $mybam $ANFILE > $mycounts"`
+   echo "Executing ... $cmd"
+   eval $cmd
+
+   # Move the count file to ../HTSeqCounts folder
+   mv $mycounts ../HTSeqCounts/
+
+   # change to the original directory
+   cd $CURRENTDIR
+
+done
+
+echo "YEAHY DONE"	
